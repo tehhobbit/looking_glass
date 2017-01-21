@@ -1,25 +1,25 @@
 defmodule BgpTable.Consumer do
-
   use GenServer
+  use AMQP
+
+
   require Logger
 
+  alias BgpTable.Parser, as: Parser
+
+
+  @exchange "pmacct"
+  @routing_key "routes"
+  @queue "herp1"
+  @queue_error "derp1"
   def start_link do
     GenServer.start_link(__MODULE__, :ok, [name: BgpTable.Consumer])
   end
 
-  def init(:ok) do
-    Logger.info("Starting rabbitmq listener")
+  def init(_opts) do
     :ets.new(:prefix_table, [:named_table, :set])
-    :ets.new(:peer_table, [:named_table, :set])
-    {:ok, connection} = AMQP.Connection.open()
-    {:ok, channel} = AMQP.Channel.open(connection)
-    :ok = AMQP.Exchange.declare(channel, "pmacct", :direct)
-    {:ok, %{queue: queue_name}} = AMQP.Queue.declare(channel, "", exclusive: true)
-    :ok = AMQP.Queue.bind(channel, queue_name, "pmacct", routing_key: "routes")
-    {:ok, _} = AMQP.Basic.consume(channel, queue_name, nil, no_ack: true)
-    {:ok, nil}
+    rabbitmq_connect()
   end
-
 
   def handle_info({:basic_deliver, payload, _}, state) do
     payload |> JSON.decode!
@@ -29,45 +29,77 @@ defmodule BgpTable.Consumer do
     {:noreply, state}
   end
 
+  def handle_info({:basic_consume_ok, _}, chan) do
+    Logger.info("Ready to receive messages from rabbitmq")
+    {:noreply, chan}
+  end
+
+  def handle_info({:basic_cancel, _}, chan) do
+    Logger.error("Got cancel shutting down")
+    {:stop, :normal, chan}
+  end
+
+  def handle_info({:basic_cancel_ok, _}, chan) do
+    Logger.info("Shutdown complete")
+    {:noreply, chan}
+  end
+
   def handle_info(data, state) do
+    Logger.debug("Unknown message #{inspect data}")
     {:noreply, state}
   end
 
-  defp record_event({:update, data}) do
-    case :ets.lookup(:prefix_table, data["ip_prefix"]) do
-      [{_, result}] -> :ets.insert(:prefix_table, {data["ip_prefix"], result ++ [to_path(data)]})
-      []            -> :ets.insert(:prefix_table, {data["ip_prefix"], [to_path(data)]})
+  def handle_info({:DOWN, _, :process, _pid, reason}, _) do
+    Logger.error("Connection to rabbitmq lost #{inspect reason}")
+    {:ok, chan} = rabbitmq_connect()
+    {:noreply, chan}
+  end
+
+  defp rabbitmq_connect do
+    Logger.info("Connecting to rabbitmq")
+    case Connection.open("amqp://guest:guest@localhost") do
+      {:ok, conn} ->
+        {:ok, chan} = Channel.open(conn)
+        Queue.declare(chan, @queue_error, durable: true)
+        Queue.declare(chan, @queue, durable: true)
+        Exchange.direct(chan, @exchange)
+        Queue.bind(chan, @queue, @exchange, routing_key: @routing_key)
+        {:ok, _consumer_tag} = Basic.consume(chan, @queue)
+        Logger.info("Connection successful")
+        {:ok, chan}
+      {:error, msg} ->
+        Logger.error("Connection error sleep 10sec #{inspect msg}")
+        :timer.sleep(10000)
+        rabbitmq_connect
     end
   end
 
-  defp record_event({:unknown, _}) do
-    Logger.error("Got an unknown event")
+  defp record_event({:update, data}) do
+    obj = [Parser.to_prefix_object(data)]
+    prefix = data["ip_prefix"]
+    case :ets.lookup(:prefix_table, prefix) do
+      [{_, result}] -> :ets.insert(:prefix_table, {prefix, result ++ obj})
+      []            -> :ets.insert(:prefix_table, {prefix, obj})
+    end
+  end
+
+  defp record_event({:unknown, event}) do
+    Logger.error("Got an unknown event #{inspect event}")
   end
 
   defp record_event({:delete, data}) do
     new_paths = []
-    {prefix, path} = to_path(data)
+    {prefix, path} = Parser.to_prefix_object(data)
     case :ets.lookup(:prefix_table, prefix) do
-      {_prefix, current_paths} -> new_paths = delete_path(current_paths, path, [])
+      {_prefix, current_paths} ->
+        case Parser.delete_path(current_paths, path, []) do
+          [h|t] -> :ets.insert(:prefix_table, {prefix, new_paths})
+          []    -> :ets.delete(:prefix_table, prefix)
+        end
       _                        -> nil
     end
-    case new_paths do
-      [h|t] -> :ets.insert(:prefix_table, {prefix, new_paths})
-      []    -> :ets.delete(:prefix_table, prefix)
-    end
   end
 
-  defp delete_path([h|t], path, acc) do
-    IO.puts(path, acc)
-    cond do
-      path == h -> [acc|t]
-      true      -> delete_path(t, path, acc)
-    end
-  end
-
-  defp delete_path([], path, acc) do
-    acc
-  end
 
   defp to_path(data) do
     path = %{
