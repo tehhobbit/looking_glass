@@ -7,7 +7,8 @@ defmodule BgpTable.Supervisor do
 
   def init(:ok) do
     children = [
-      worker(BgpTable.Consumer, [[name: BgpTable.Consumer]]),
+      worker(BgpTable.LookupTable.Prefix, []),
+      worker(BgpTable.Consumer, []),
     ]
     supervise(children, strategy: :one_for_one)
   end

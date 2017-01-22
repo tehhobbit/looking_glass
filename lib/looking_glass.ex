@@ -10,7 +10,7 @@ defmodule LookingGlass do
     children = [
       # Start the endpoint when the application starts
       supervisor(LookingGlass.Endpoint, []),
-      supervisor(BgpTable.Consumer, [])
+      supervisor(BgpTable.Supervisor, []),
     ]
 
     # See http://elixir-lang.org/docs/stable/elixir/Supervisor.html

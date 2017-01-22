@@ -9,18 +9,14 @@ defmodule BgpTable.Parser do
     {data["ip_prefix"], path}
   end
 
+  def delete_path([], path), do: :nomatch
+  def delete_path([{prefix, result}], path), do: delete_path(result, path, [])
+  def delete_path([], path, []), do: :empty
+  def delete_path([], _, acc), do: acc
   def delete_path([h|t], path, acc) do
     cond do
       path == h -> delete_path([], path, [acc|t])
-      true      -> delete_path(t, path, [h|acc])
+      true      -> delete_path(t, path, h ++ acc)
     end
-  end
-
-  def delete_path([], path, []) do
-    :empty
-  end
-
-  def delete_path([], _, acc) do
-    acc
   end
 end
